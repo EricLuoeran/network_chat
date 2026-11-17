@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>手机互传</title>
+<link rel="icon" type="image/x-icon" href="/web/favicon.ico">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background:#f0f2f5; height:100vh; display:flex; flex-direction:column; }
+#header { background:#1677ff; color:#fff; padding:12px 16px; text-align:center; font-size:16px; font-weight:600; display:flex; align-items:center; gap:8px; }
+#header .title { flex:1; }
+#msgs { flex:1; overflow-y:auto; padding:12px; }
+.msg { margin-bottom:12px; animation:in 0.2s; }
+@keyframes in { from{opacity:0;transform:translateY(8px);} to{opacity:1;transform:translateY(0);} }
+.msg.me { text-align:right; }
+.msg.peer { text-align:left; }
+.msg .bubble { display:inline-block; max-width:80%; padding:10px 14px; border-radius:12px; font-size:15px; overflow-wrap:break-word;min-width:40px; text-align:left; }
+.msg.me .bubble { background:#1677ff; color:#fff; border-bottom-right-radius:4px; }
+.msg.peer .bubble { background:#fff; border-bottom-left-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,0.06); }
+.msg .time { font-size:11px; color:#999; margin-top:2px; padding:0 14px; }
+.msg.me .time { text-align:right; }
+.msg .progress { font-size:11px; color:#1677ff; margin-top:2px; }
+
+#input-area { background:#fff; padding:10px 12px; display:flex; gap:8px; align-items:center; border-top:1px solid #e8e8e8; }
+#input-area input { flex:1; padding:10px 12px; border:1px solid #e8e8e8; border-radius:20px; font-size:15px; outline:none; background:#f0f2f5; }
+#input-area input:focus { border-color:#1677ff; background:#fff; }
+#input-area button { width:40px; height:40px; border:none; border-radius:50%; font-size:20px; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+#btn-send { background:#1677ff; color:#fff; }
+#btn-send:disabled { background:#ccc; }
+#btn-file { background:#f0f2f5; }
+#status { text-align:center; padding:4px; font-size:12px; color:#999; }
+
+#file-modal { position:fixed; top:0;left:0;right:0;bottom:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; z-index:100; }
+#file-modal .box { background:#fff; border-radius:12px; padding:20px; width:85%; text-align:center; }
+#file-modal .box button { margin:6px; padding:10px 20px; border:1px solid #e8e8e8; border-radius:8px; background:#fff; font-size:15px; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <span style="font-size:18px;">📱</span>
+  <span class="title" id="header-title">手机互传</span>
+</div>
+
+<div id="status">正在连接电脑...</div>
+<div id="msgs"></div>
+
+<div id="input-area">
+  <button id="btn-file" title="发送文件">📎</button>
+  <input type="file" id="file-input" style="display:none" multiple />
+  <input type="text" id="msg-input" placeholder="输入消息..." autofocus />
+  <button id="btn-send" title="发送">▶</button>
+</div>
+
+<div id="file-modal">
+  <div class="box">
+    <h3>📤 发送到电脑</h3>
+    <p style="color:#999;font-size:13px;margin:8px 0;">支持任意大小文件，分块传输</p>
+    <button onclick="sendFile()" style="background:#1677ff;color:#fff;border:none;">📎 发送文件</button>
+    <button onclick="sendFolder()" style="background:#52c41a;color:#fff;border:none;">📁 发送文件夹</button>
+    <button onclick="closeFileModal()">取消</button>
+  </div>
+</div>
+
+<input type="file" id="file-picker" style="display:none" multiple />
+<input type="file" id="folder-picker" style="display:none" webkitdirectory directory multiple />
+
+<script>
+// =============================================================================
+// Mobile Client — binary chunked file transfer
+// =============================================================================
+
+const CHUNK_SIZE = 64 * 1024; // 64KB chunks
+let ws, myId, myName = '手机';
+const messages = [];
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws?role=mobile`);
+  ws.binaryType = 'arraybuffer'; // receive binary as ArrayBuffer
+
+  ws.onopen = () => {
+    document.getElementById('status').textContent = '已连接';
+    ws.send(JSON.stringify({ type: 'hello', name: myName }));
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const msg = JSON.parse(e.data);
+      switch (msg.type) {
+        case 'welcome':
+          myId = msg.id;
+          document.getElementById('status').textContent = '已连接到电脑 ✅';
+          document.getElementById('header-title').textContent = '📱 → 💻 电脑';
+          break;
+        case 'text':
+          addMsg('peer', msg.fromName || '电脑', msg.text);
+          break;
+        case 'file_ack':
+          // Computer ready — start sending binary chunks
+          startChunkedSend(msg.id);
+          break;
+      }
+    }
+  };
+
+  ws.onclose = () => { document.getElementById('status').textContent = '连接断开，刷新重试'; };
+}
+
+function addMsg(dir, name, text) {
+  const m = { dir, name, text, ts: Date.now() };
+  messages.push(m);
+  appMsgDOM(m);
+}
+
+// Append a text message to DOM (no full re-render)
+function appMsgDOM(m) {
+  const el = document.getElementById('msgs');
+  const div = document.createElement('div');
+  div.className = 'msg ' + (m.dir || 'peer');
+  div.innerHTML = `<div class="bubble">${esc(m.text)}</div>
+    <div class="time">${new Date(m.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</div>`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// =============================================================================
+// Send text
+// =============================================================================
+
+document.getElementById('btn-send').addEventListener('click', () => {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || !ws) return;
+  ws.send(JSON.stringify({ type: 'text', text, to: 'computer' }));
+  addMsg('me', '我', text);
+  input.value = '';
+});
+
+document.getElementById('msg-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('btn-send').click();
+});
+
+// =============================================================================
+// File sending (binary chunked)
+// =============================================================================
+
+let sendQueue = [];
+
+document.getElementById('btn-file').addEventListener('click', () => {
+  document.getElementById('file-modal').style.display = 'flex';
+});
+
+function closeFileModal() {
+  document.getElementById('file-modal').style.display = 'none';
+}
+
+function sendFile() {
+  document.getElementById('file-picker').click();
+  document.getElementById('file-modal').style.display = 'none';
+}
+
+function sendFolder() {
+  document.getElementById('folder-picker').click();
+  document.getElementById('file-modal').style.display = 'none';
+}
+
+document.getElementById('file-picker').addEventListener('change', (e) => {
+  sendQueue.push(...Array.from(e.target.files));
+  e.target.value = '';
+  processQueue();
+});
+
+document.getElementById('folder-picker').addEventListener('change', (e) => {
+  sendQueue.push(...Array.from(e.target.files));
+  e.target.value = '';
+  processQueue();
+});
+
+function processQueue() {
+  if (!sendQueue.length) return;
+  // Send files one at a time to avoid overwhelming
+  if (document.querySelector('.sending')) return;
+  sendNextFile();
+}
+
+function sendNextFile() {
+  if (!sendQueue.length) return;
+  const file = sendQueue.shift();
+  const fileId = 'f' + Date.now();
+
+  // Tell computer we're about to send
+  ws.send(JSON.stringify({
+    type: 'file_meta',
+    id: fileId,
+    name: file.name,
+    size: file.size,
+    mime: file.type || 'application/octet-stream',
+    to: 'computer',
+  }));
+
+  // Add a message with a unique DOM id for progress updates
+  const msgId = 'msg-' + fileId;
+  messages.push({ dir: 'me', name: '我', text: '📎 ' + file.name + ' (' + fmtSize(file.size) + ')', ts: Date.now(), msgId: msgId, progress: 0, sending: true, fileId: fileId });
+  addMsgDOM(messages[messages.length-1]);
+
+  // Store file info for when computer acks
+  pendingFile = { file, fileId, msgId: msgId, offset: 0 };
+}
+
+// Add a single message DOM node (without re-rendering everything)
+function addMsgDOM(m) {
+  const el = document.getElementById('msgs');
+  const div = document.createElement('div');
+  div.className = 'msg ' + (m.dir || 'me');
+  div.id = m.msgId || '';
+  let extra = '';
+  if (m.progress !== undefined) {
+    extra = `<div class="progress" id="${m.msgId}-pct">${m.progress}%</div>`;
+  }
+  div.innerHTML = `<div class="bubble">${esc(m.text)}</div>${extra}
+    <div class="time">${new Date(m.ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</div>`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+// Update only the progress text of a file message (no full re-render)
+function updateProgress(msgId, pct) {
+  const pctEl = document.getElementById(msgId + '-pct');
+  if (pctEl) {
+    pctEl.textContent = pct + '%';
+  }
+  // Auto-scroll
+  const el = document.getElementById('msgs');
+  el.scrollTop = el.scrollHeight;
+}
+
+let pendingFile = null;
+
+function startChunkedSend(fileId) {
+  if (!pendingFile || pendingFile.fileId !== fileId) return;
+  sendNextChunk();
+}
+
+function sendNextChunk() {
+  if (!pendingFile) return;
+
+  const { file, fileId, offset, msgId } = pendingFile;
+  const end = Math.min(offset + CHUNK_SIZE, file.size);
+  const blob = file.slice(offset, end);
+
+  blob.arrayBuffer().then(buf => {
+    ws.send(buf);
+    pendingFile.offset = end;
+
+    // Update ONLY the progress text — no full re-render
+    const pct = Math.round((end / file.size) * 100);
+    updateProgress(msgId, pct);
+
+    if (end >= file.size) {
+      ws.send(JSON.stringify({ type: 'file_end', id: fileId }));
+      // Mark done
+      const pctEl = document.getElementById(msgId + '-pct');
+      if (pctEl) pctEl.textContent = '✅ 已发送';
+      pendingFile = null;
+      setTimeout(processQueue, 200);
+    } else {
+      sendNextChunk();
+    }
+  });
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + u[Math.min(i, u.length-1)];
+}
+
+connect();
+</script>
+</body>
+</html>

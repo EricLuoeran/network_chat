@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network Chat · Python 协议教学版</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f0f2f5; height: 100vh; display: flex;
+  }
+  /* 左侧：我的信息 + 联系人 */
+  .sidebar {
+    width: 260px; background: #fff; border-right: 1px solid #e8e8e8;
+    display: flex; flex-direction: column;
+  }
+  .me {
+    padding: 16px; border-bottom: 1px solid #e8e8e8; background: #fafafa;
+  }
+  .me-name { font-size: 16px; font-weight: 600; }
+  .me-addr { font-size: 12px; color: #888; margin-top: 4px; line-height: 1.6; }
+  .peer-list { flex: 1; overflow-y: auto; }
+  .peer-item {
+    padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #f5f5f5;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .peer-item:hover { background: #f5f5f5; }
+  .peer-item.active { background: #e6f4ff; }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%; background: #1677ff;
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    font-weight: 600; flex-shrink: 0;
+  }
+  .peer-name { font-size: 14px; font-weight: 500; }
+  .peer-status { font-size: 12px; color: #999; margin-top: 2px; }
+  .dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: #52c41a; margin-right: 4px;
+  }
+  .dot.offline { background: #d9d9d9; }
+  .empty { padding: 40px 20px; text-align: center; color: #bbb; font-size: 13px; }
+
+  /* 右侧：聊天区 */
+  .main { flex: 1; display: flex; flex-direction: column; }
+  .header {
+    padding: 14px 20px; background: #fff; border-bottom: 1px solid #e8e8e8;
+    font-weight: 600; display: flex; justify-content: space-between; align-items: center;
+  }
+  .hint { font-size: 12px; color: #999; font-weight: normal; }
+  .messages { flex: 1; overflow-y: auto; padding: 20px; background: #f5f5f5; }
+  .msg-row { margin-bottom: 14px; display: flex; }
+  .msg-row.self { justify-content: flex-end; }
+  .bubble {
+    max-width: 60%; padding: 9px 13px; border-radius: 8px;
+    background: #fff; font-size: 14px; line-height: 1.5;
+    word-break: break-word; box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+  .msg-row.self .bubble { background: #95ec69; }
+  .msg-time { font-size: 11px; color: #aaa; margin-top: 3px; text-align: right; }
+  .system { text-align: center; color: #bbb; font-size: 12px; margin: 10px 0; }
+  .input-area {
+    padding: 12px 16px; background: #fff; border-top: 1px solid #e8e8e8;
+    display: flex; gap: 10px;
+  }
+  #msg-input {
+    flex: 1; padding: 9px 12px; border: 1px solid #d9d9d9; border-radius: 6px;
+    font-size: 14px; outline: none; resize: none; font-family: inherit;
+  }
+  #msg-input:focus { border-color: #1677ff; }
+  button {
+    padding: 9px 18px; border: none; border-radius: 6px; cursor: pointer;
+    background: #1677ff; color: #fff; font-size: 14px;
+  }
+  button:hover { opacity: .85; }
+  button.gray { background: #f0f0f0; color: #333; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="me">
+    <div class="me-name" id="my-name">加载中…</div>
+    <div class="me-addr" id="my-addr"></div>
+  </div>
+  <div class="peer-list" id="peer-list"></div>
+  <div style="padding:10px;">
+    <button class="gray" style="width:100%;" onclick="manualConnect()">+ 手动连接</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="header">
+    <span id="chat-title">选择一个联系人开始聊天</span>
+    <span class="hint" id="ws-status">连接中…</span>
+  </div>
+  <div class="messages" id="messages">
+    <div class="system">局域网自动发现 · 手写协议实现</div>
+  </div>
+  <div class="input-area">
+    <textarea id="msg-input" rows="1" placeholder="输入消息，回车发送"></textarea>
+    <button onclick="sendMessage()">发送</button>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+   前端与后端的关系是 C/S：浏览器(Client) → 本机后端(Server)
+   后端之间才是 P2P，前端完全不参与
+   ========================================================================== */
+
+const STATE = {
+  me: null,
+  peers: [],
+  activePeerId: null,
+  messages: {},   // peerId → [msg]
+  ws: null,
+};
+
+// ---------- 初始化 ----------
+async function init() {
+  await loadMe();
+  await loadPeers();
+  setupWebSocket();
+  setInterval(loadPeers, 5000);   // 兜底轮询
+}
+
+async function loadMe() {
+  try {
+    const r = await fetch('/api/me');
+    STATE.me = await r.json();
+    document.getElementById('my-name').textContent = STATE.me.name;
+    document.getElementById('my-addr').innerHTML =
+      '📍 ' + STATE.me.ips.map(ip => `${ip}:${STATE.me.port}`).join('<br>📍 ');
+  } catch (e) { console.error(e); }
+}
+
+async function loadPeers() {
+  try {
+    const r = await fetch('/api/peers');
+    STATE.peers = await r.json();
+    renderPeers();
+  } catch (e) { /* 忽略 */ }
+}
+
+// ---------- WebSocket（长连接，后端可主动推送）----------
+function setupWebSocket() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws?role=frontend`;
+  const ws = new WebSocket(url);
+  STATE.ws = ws;
+
+  ws.onopen = () => {
+    document.getElementById('ws-status').textContent = '● 已连接';
+    document.getElementById('ws-status').style.color = '#52c41a';
+    loadPeers();
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-status').textContent = '○ 重连中…';
+    document.getElementById('ws-status').style.color = '#999';
+    setTimeout(setupWebSocket, 2000);   // 自动重连
+  };
+  ws.onmessage = (e) => {
+    try { handleEvent(JSON.parse(e.data)); } catch (err) { console.error(err); }
+  };
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case 'peers':
+      STATE.peers = ev.data;
+      renderPeers();
+      break;
+    case 'new_message':
+      // 后端推来的新消息
+      if (!STATE.messages[ev.peerId]) STATE.messages[ev.peerId] = [];
+      STATE.messages[ev.peerId].push({
+        direction: ev.direction, msgType: ev.msgType,
+        content: ev.content, timestamp: ev.timestamp,
+      });
+      if (STATE.activePeerId === ev.peerId) renderMessages();
+      break;
+  }
+}
+
+// ---------- 渲染 ----------
+function renderPeers() {
+  const list = document.getElementById('peer-list');
+  if (!STATE.peers.length) {
+    list.innerHTML = '<div class="empty">正在搜索局域网内的设备…<br>同一网络会自动发现</div>';
+    return;
+  }
+  list.innerHTML = STATE.peers.map(p => `
+    <div class="peer-item ${STATE.activePeerId === p.id ? 'active' : ''}"
+         onclick="selectPeer('${encodeURIComponent(p.id)}')">
+      <div class="avatar">${(p.name || '?')[0].toUpperCase()}</div>
+      <div>
+        <div class="peer-name">${escapeHtml(p.name)}</div>
+        <div class="peer-status">
+          <span class="dot ${p.connected ? '' : 'offline'}"></span>
+          ${p.connected ? '已连接' : '在线'} · ${escapeHtml(p.host)}
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+function renderMessages() {
+  const box = document.getElementById('messages');
+  const msgs = STATE.messages[STATE.activePeerId] || [];
+  if (!msgs.length) {
+    box.innerHTML = '<div class="system">还没有消息</div>';
+    return;
+  }
+  box.innerHTML = msgs.map(m => {
+    const isSelf = m.direction === 'sent';
+    const time = new Date(m.timestamp || Date.now())
+      .toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    return `
+      <div class="msg-row ${isSelf ? 'self' : ''}">
+        <div>
+          <div class="bubble">${escapeHtml(m.content || '')}</div>
+          <div class="msg-time">${time}</div>
+        </div>
+      </div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+// ---------- 交互 ----------
+async function selectPeer(encodedId) {
+  const peerId = decodeURIComponent(encodedId);
+  STATE.activePeerId = peerId;
+  const p = STATE.peers.find(x => x.id === peerId);
+  document.getElementById('chat-title').textContent = p ? p.name : peerId;
+
+  // 拉历史消息
+  try {
+    const r = await fetch('/api/messages/' + encodeURIComponent(peerId));
+    STATE.messages[peerId] = await r.json();
+  } catch (e) { STATE.messages[peerId] = []; }
+  renderMessages();
+  renderPeers();
+
+  // 如果还没连上，让后端主动去连（P2P 的客户端身份）
+  if (p && !p.connected) {
+    fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: p.host, port: p.port, name: p.name }),
+    });
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || !STATE.activePeerId) return;
+
+  try {
+    const r = await fetch('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ peerId: STATE.activePeerId, text }),
+    });
+    const result = await r.json();
+    if (result.status === 'ok') {
+      // 本地也要显示（后端保存了，但界面要立刻更新）
+      if (!STATE.messages[STATE.activePeerId]) STATE.messages[STATE.activePeerId] = [];
+      STATE.messages[STATE.activePeerId].push({
+        direction: 'sent', msgType: 'text',
+        content: text, timestamp: Date.now(),
+      });
+      renderMessages();
+      input.value = '';
+    } else {
+      alert('发送失败：对方可能未连接');
+    }
+  } catch (e) {
+    alert('发送失败');
+  }
+  input.focus();
+}
+
+function manualConnect() {
+  const host = prompt('输入对方 IP 地址：\n（例：192.168.1.100）');
+  if (!host) return;
+  const portStr = prompt('输入对方端口号：');
+  if (!portStr) return;
+  const port = parseInt(portStr);
+  if (!port) return alert('端口无效');
+  fetch('/api/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host, port, name: 'peer' }),
+  });
+  setTimeout(loadPeers, 1000);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// 回车发送
+document.getElementById('msg-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+init();
+</script>
+</body>
+</html>

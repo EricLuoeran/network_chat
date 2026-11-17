@@ -1,0 +1,18 @@
+# Network Chat — Python 协议教学版
+#
+# ★ 核心协议实现（protocols/ 目录）只依赖 Python 标准库，零第三方依赖。
+#   整个项目不需要 pip install 任何东西，直接运行即可：
+#
+#       python main.py --name 你的名字
+#
+# 之所以能做到零依赖，是因为每一层协议都是手写的：
+#   · TCP / UDP  → socket（标准库）
+#   · HTTP       → 自己拼报文（protocols/http.py）
+#   · WebSocket  → 自己算握手、自己编解码帧（protocols/websocket.py）
+#   · DNS / mDNS → 自己编码报文、处理域名压缩（protocols/dns.py）
+#   · 持久化     → sqlite3（标准库，目前尚未启用）
+#
+# 对比：Go 版用了 gorilla/websocket 和 hashicorp/mdns 两个第三方库，
+#       协议细节被封装起来了；Python 版把它们全部展开，便于学习。
+#
+# 环境要求：Python 3.8+（用到了 socket.if_nameindex 等较新 API）

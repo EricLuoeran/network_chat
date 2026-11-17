@@ -1,0 +1,40 @@
+# ===== 构建产物 =====
+network_chat
+network_chat.exe
+network_chat.exe~
+network_chat_old.exe
+network_chat_mac
+network_chat_linux
+*.test
+_race_check.exe
+
+# ===== 运行时数据（绝对不要提交！）=====
+# data/ 下有 identity.json（你的私钥）与 chat.db（聊天记录）
+# 私钥泄露 = 他人可冒充你的身份，务必保持忽略
+data/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+# 演示脚本生成的输出文件（由 struct_demo.py 运行时产生）
+network_python/struct_demo.txt
+
+# ===== Go / 编译器临时文件 =====
+*.o
+*.obj
+*.~*
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
