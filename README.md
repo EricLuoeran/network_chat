@@ -2,6 +2,16 @@
 
 纯局域网通信工具，零服务器、零外部依赖、端到端加密。
 
+## 下载
+
+**不想编译？** 直接下载打包好的可执行文件：
+
+[![Download](https://img.shields.io/github/v/release/EricLuoeran/network_chat?label=download&style=flat-square)](https://github.com/EricLuoeran/network_chat/releases/latest)
+
+前往 [Releases](https://github.com/EricLuoeran/network_chat/releases/latest) 下载 `network_chat.exe`，双击即可运行（Windows 10/11 64 位）。
+
+首次运行如果弹出 Windows 防火墙提示，请**同时勾选「专用网络」和「公用网络」**，否则对方无法连接到你。
+
 ## 功能
 
 - 🔍 **自动发现** — mDNS 自动发现局域网内的同事
